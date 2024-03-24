@@ -12,7 +12,7 @@ using namespace std;
 // 仅测试方差为1 的高斯一阶偏导核
 #define VARIANCE    1
 #define MASK_WIDTH  (6*VARIANCE + 1)
-#define GRID_ROWS   2
+#define GRID_ROWS   1
 
 #define BLOCKSIZE   256
 
@@ -104,8 +104,12 @@ __host__ float* get_conv_kernel(int theta,DIR_T type)
 __global__ void gpu_convolution(uchar* src_img,uchar* output_img,float* conv_kernel,int width,int height)
 {
     __shared__ uchar mem_img_data[BLOCK_Y + MASK_WIDTH - 1][BLOCK_X + MASK_WIDTH - 1];
-
-    for(int h = 0;h < height;h += (GRID_ROWS * BLOCK_Y))
+    
+    if(threadIdx.x == 0)
+    {
+        printf("grid:%d block:%d\n",gridDim.y,blockDim.y);
+    }
+    for(int h = 0;h < height;h += (gridDim.y * blockDim.y))
     {
         // copy data to shared mem
 
@@ -317,30 +321,28 @@ __global__ void gpu_find_max_val(uchar* xy_img,int* max_val,int length)
     // printf("=====%d====\n",tmp_max);
     __syncthreads();
 
-    for(int length = BLOCKSIZE/2; length > 1; length >>= 1)
+    for(int len = BLOCKSIZE/2; len >= 32; len >>= 1)
     {
-        if(threadIdx.x < length)
+        if(threadIdx.x < len)
         {
-            if(mem_max_block[threadIdx.x] < mem_max_block[threadIdx.x + length])
-            {
-                mem_max_block[threadIdx.x] = mem_max_block[threadIdx.x + length];
-            }
+            mem_max_block[threadIdx.x] = (mem_max_block[threadIdx.x]>mem_max_block[threadIdx.x + len])?mem_max_block[threadIdx.x]:mem_max_block[threadIdx.x + len];
         }
         __syncthreads();
     }
 
-    // int val = mem_max_block[0];
-    if(mem_max_block[threadIdx.x] < mem_max_block[threadIdx.x + 1])
+    int val = mem_max_block[threadIdx.x];
+    for(int i = 16;i > 0; i /= 2)
     {
-        mem_max_block[threadIdx.x] = mem_max_block[threadIdx.x + 1];
+        int tmp_val = __shfl_down_sync(0xffffffff,val,i);
+        val = (val>tmp_val)?val:tmp_val;
     }
+
     if(blockDim.x * blockIdx.x < length)
     {
         
         if(threadIdx.x == 0)
         {
-            // printf("++++%d++++++\n",mem_max_block[0]);
-            atomicMax(max_val,mem_max_block[0]);
+            atomicMax(max_val,val);
         }
     }
 
@@ -408,7 +410,7 @@ int main()
     float *conv_y_kernel = get_conv_kernel(1,DIR_Y); // host
 
 
-    unsigned int grid_rows = GRID_ROWS;//(gray_img.rows + BLOCK_X - 1)/BLOCK_X;
+    unsigned int grid_rows = GRID_ROWS;//(gray_img.rows + BLOCK_Y - 1)/BLOCK_Y/4;
     unsigned int grid_cols = (gray_img.cols + BLOCK_X - 1)/BLOCK_X;
     dim3 dimGrid(grid_cols,grid_rows);
     dim3 dimBlock(BLOCK_Y,BLOCK_X);
@@ -421,12 +423,10 @@ int main()
     gpu_merge_grid_xy<<<dimGrid,dimBlock>>>(dev_grad_x_img,dev_grad_y_img,dev_grad_xy,gray_img.cols,gray_img.rows);
 
     cudaDeviceSynchronize();
-    // int grid_size = (img_data_size + BLOCKSIZE - 1)/BLOCKSIZE;
-    // gpu_find_max_val<<<grid_size,BLOCKSIZE>>>(dev_grad_xy,&max_val,img_data_size);
+    int grid_size = (img_data_size + BLOCKSIZE - 1)/BLOCKSIZE;
 
-    cudaMemcpy(host_grad_xy,dev_grad_xy,img_data_size,cudaMemcpyDeviceToHost);
-    max_val = cpu_find_max_value(host_grad_xy,img_data_size);
-
+    gpu_find_max_val<<<grid_size,BLOCKSIZE>>>(dev_grad_xy,&max_val,img_data_size);
+    cudaDeviceSynchronize();
     cout << "max_val: " << max_val << endl;
     gpu_normalize<<<dimGrid,dimBlock>>>(dev_grad_xy,gray_img.cols,gray_img.rows,max_val);
     // 非极大化抑制
@@ -435,7 +435,7 @@ int main()
     // 输出
     cudaMemcpy(host_grad_xy,dev_grad_xy,img_data_size,cudaMemcpyDeviceToHost);
     Mat save_gray_img(gray_img.rows,gray_img.cols,CV_8U,host_grad_xy);
-    imwrite("./image_output.jpg",save_gray_img);
+    imwrite("./output_img.jpg",save_gray_img);
 
 
     
@@ -445,6 +445,6 @@ int main()
     cudaFree(dev_grad_x_img);
     cudaFree(dev_grad_y_img);
     cudaFree(dev_grad_xy);
-    // cudaFreeHost(host_grad_xy);
+    cudaFreeHost(host_grad_xy);
     return 0;
 }
