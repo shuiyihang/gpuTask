@@ -2,6 +2,8 @@
 
 #include <iostream>
 #include <cmath>
+#include <chrono>
+#include <sys/time.h>
 
 using namespace cv;
 using namespace std;
@@ -105,10 +107,6 @@ __global__ void gpu_convolution(uchar* src_img,uchar* output_img,float* conv_ker
 {
     __shared__ uchar mem_img_data[BLOCK_Y + MASK_WIDTH - 1][BLOCK_X + MASK_WIDTH - 1];
     
-    if(threadIdx.x == 0)
-    {
-        printf("grid:%d block:%d\n",gridDim.y,blockDim.y);
-    }
     for(int h = 0;h < height;h += (gridDim.y * blockDim.y))
     {
         // copy data to shared mem
@@ -295,7 +293,7 @@ __global__ void gpu_convolution(uchar* src_img,uchar* output_img,float* conv_ker
 
 __global__ void gpu_merge_grid_xy(uchar* x_img,uchar* y_img,uchar* xy_img,int width,int height)
 {
-    for(int h = 0;h < height;h += (GRID_ROWS * BLOCK_Y))
+    for(int h = 0;h < height;h += (gridDim.y * blockDim.y))
     {
         int row = blockDim.y * blockIdx.y + threadIdx.y + h;
         int col = blockDim.x * blockIdx.x + threadIdx.x;
@@ -352,7 +350,7 @@ __global__ void gpu_find_max_val(uchar* xy_img,int* max_val,int length)
 // atomicMax(res,val)
 __global__ void gpu_normalize(uchar* xy_img,int width,int height,int max)
 {
-    for(int h = 0;h < height;h += (GRID_ROWS * BLOCK_Y))
+    for(int h = 0;h < height;h += (gridDim.y * blockDim.y))
     {
         int row = blockDim.y * blockIdx.y + threadIdx.y + h;
         int col = blockDim.x * blockIdx.x + threadIdx.x;
@@ -362,9 +360,17 @@ __global__ void gpu_normalize(uchar* xy_img,int width,int height,int max)
         }
     }
 }
+
+double get_time()
+{
+    timeval tv;
+    gettimeofday(&tv,NULL);
+    return tv.tv_sec + (double)(tv.tv_usec * 0.000001);
+}
+
 int main()
 {
-    Mat origin_img = imread("./input_img.png");// w-959 h-640
+    Mat origin_img = imread("./input_img.png");
 
     Mat gray_img;
     cvtColor(origin_img,gray_img,COLOR_RGB2GRAY);
@@ -406,11 +412,15 @@ int main()
 
     cudaMemcpy(dev_gray_img, gray_img.data,img_data_size,cudaMemcpyHostToDevice);
 
+
+    // auto start_1 = chrono::system_clock::now();
+    double t0 = get_time();
+
     float *conv_x_kernel = get_conv_kernel(1,DIR_X);
     float *conv_y_kernel = get_conv_kernel(1,DIR_Y); // host
 
 
-    unsigned int grid_rows = GRID_ROWS;//(gray_img.rows + BLOCK_Y - 1)/BLOCK_Y/4;
+    unsigned int grid_rows = (gray_img.rows + BLOCK_Y - 1)/BLOCK_Y;
     unsigned int grid_cols = (gray_img.cols + BLOCK_X - 1)/BLOCK_X;
     dim3 dimGrid(grid_cols,grid_rows);
     dim3 dimBlock(BLOCK_Y,BLOCK_X);
@@ -427,7 +437,7 @@ int main()
 
     gpu_find_max_val<<<grid_size,BLOCKSIZE>>>(dev_grad_xy,&max_val,img_data_size);
     cudaDeviceSynchronize();
-    cout << "max_val: " << max_val << endl;
+    // cout << "max_val: " << max_val << endl;
     gpu_normalize<<<dimGrid,dimBlock>>>(dev_grad_xy,gray_img.cols,gray_img.rows,max_val);
     // 非极大化抑制
 
@@ -435,9 +445,21 @@ int main()
     // 输出
     cudaMemcpy(host_grad_xy,dev_grad_xy,img_data_size,cudaMemcpyDeviceToHost);
     Mat save_gray_img(gray_img.rows,gray_img.cols,CV_8U,host_grad_xy);
-    imwrite("./output_img.jpg",save_gray_img);
+    imwrite("./output_img_gpu.jpg",save_gray_img);
 
+    // auto start_2 = chrono::system_clock::now();
+    // double t1 = get_time();
+    // Mat cpu_det_result;
+    // Canny(gray_img,cpu_det_result,50,150);
 
+    // imwrite("./output_img_cpu.jpg",cpu_det_result);
+    // // auto start_3 = chrono::system_clock::now();
+    // double t2 = get_time();
+
+    // // printf("calc time: gpu %.5f ms , cpu %.5f ms\n",chrono::duration_cast<chrono::milliseconds>(start_2 - start_1).count(),\
+    // //                                                 chrono::duration_cast<chrono::milliseconds>(start_3 - start_2).count());
+    // printf("calc time: gpu %.5f ms , cpu %.5f ms\n",(t1 - t0)*1000,\
+    //                                                 (t2 - t1)*1000);
     
     cudaFreeHost(conv_x_kernel);
     cudaFreeHost(conv_y_kernel);

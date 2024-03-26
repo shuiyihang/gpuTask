@@ -1,7 +1,6 @@
 使用gpu来做图像边缘检测
 
-未解决问题：
-    gpu_find_max_val编译出错
-
+输入：
+    ![input img](./input_img.png)
 结果：
-    
+    ![output img](./output_img_gpu.jpg)
