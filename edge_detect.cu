@@ -103,9 +103,21 @@ __host__ float* get_conv_kernel(int theta,DIR_T type)
  * |
  * y
 */
-__global__ void gpu_convolution(uchar* src_img,uchar* output_img,float* conv_kernel,int width,int height)
+__global__ void gpu_convolution(uchar* src_img,uchar* output_img,float* conv_kernel_x,float* conv_kernel_y,int width,int height)
 {
     __shared__ uchar mem_img_data[BLOCK_Y + MASK_WIDTH - 1][BLOCK_X + MASK_WIDTH - 1];
+    
+    //将高斯核取回到共享内存中
+    __shared__ float mem_conv_kernel_x[MASK_WIDTH][MASK_WIDTH];
+    __shared__ float mem_conv_kernel_y[MASK_WIDTH][MASK_WIDTH];
+    int ker_row = threadIdx.y;
+    int ker_col = threadIdx.x;
+    if(ker_row < MASK_WIDTH && ker_col < MASK_WIDTH)
+    {
+        mem_conv_kernel_x[ker_row][ker_col] = conv_kernel_x[ker_row*MASK_WIDTH + ker_col];
+        mem_conv_kernel_y[ker_row][ker_col] = conv_kernel_y[ker_row*MASK_WIDTH + ker_col];
+    }
+    __syncthreads();
     
     for(int h = 0;h < height;h += (gridDim.y * blockDim.y))
     {
@@ -273,17 +285,19 @@ __global__ void gpu_convolution(uchar* src_img,uchar* output_img,float* conv_ker
 
         __syncthreads();
         
-        float sum = 0.0000f;
+        float sum_x = 0.0000f;
+        float sum_y = 0.0000f;
         if(col < width && row < height)
         {
             for(int i = 0;i < MASK_WIDTH;i++)
             {
                 for(int j = 0;j < MASK_WIDTH;j++)
                 {
-                    sum += mem_img_data[y_id + i][x_id + j] * conv_kernel[i * MASK_WIDTH + j];
+                    sum_x += mem_img_data[y_id + i][x_id + j] * mem_conv_kernel_x[i][j];
+                    sum_y += mem_img_data[y_id + i][x_id + j] * mem_conv_kernel_y[i][j];
                 }
             }
-            output_img[width*row + col] = sum;
+            output_img[width*row + col] =sqrt(pow(sum_x,2) + pow(sum_y,2));
         }
     }
 
@@ -383,24 +397,12 @@ int main()
     int img_data_size = gray_img.rows * gray_img.cols * sizeof(uchar);
     printf("img size:(%d,%d)\n",gray_img.rows, gray_img.cols);
     uchar *dev_gray_img;
-    uchar *dev_grad_x_img;
-    uchar *dev_grad_y_img;
     uchar *dev_grad_xy;
     uchar *host_grad_xy;
 
     cudaMalloc(&dev_gray_img, img_data_size);
     if(dev_gray_img == NULL){
         cout << "dev_gray_img malloc failed"<<endl;
-        return;
-    }
-    cudaMalloc(&dev_grad_x_img, img_data_size);
-    if(dev_grad_x_img == NULL){
-        cout << "dev_grad_x_img malloc failed"<<endl;
-        return;
-    }
-    cudaMalloc(&dev_grad_y_img, img_data_size);
-    if(dev_grad_y_img == NULL){
-        cout << "dev_grad_y_img malloc failed"<<endl;
         return;
     }
     cudaMalloc(&dev_grad_xy, img_data_size);
@@ -426,18 +428,15 @@ int main()
     dim3 dimBlock(BLOCK_Y,BLOCK_X);
 
     // 得到xy方向梯度
-    gpu_convolution<<<dimGrid,dimBlock>>>(dev_gray_img,dev_grad_x_img,conv_x_kernel,gray_img.cols,gray_img.rows);
-    gpu_convolution<<<dimGrid,dimBlock>>>(dev_gray_img,dev_grad_y_img,conv_y_kernel,gray_img.cols,gray_img.rows);
+    gpu_convolution<<<dimGrid,dimBlock>>>(dev_gray_img,dev_grad_xy,conv_x_kernel,conv_y_kernel,gray_img.cols,gray_img.rows);
 
     cudaDeviceSynchronize();
-    gpu_merge_grid_xy<<<dimGrid,dimBlock>>>(dev_grad_x_img,dev_grad_y_img,dev_grad_xy,gray_img.cols,gray_img.rows);
 
-    cudaDeviceSynchronize();
     int grid_size = (img_data_size + BLOCKSIZE - 1)/BLOCKSIZE;
 
     gpu_find_max_val<<<grid_size,BLOCKSIZE>>>(dev_grad_xy,&max_val,img_data_size);
     cudaDeviceSynchronize();
-    // cout << "max_val: " << max_val << endl;
+    cout << "max_val: " << max_val << endl;
     gpu_normalize<<<dimGrid,dimBlock>>>(dev_grad_xy,gray_img.cols,gray_img.rows,max_val);
     // 非极大化抑制
 
@@ -464,8 +463,6 @@ int main()
     cudaFreeHost(conv_x_kernel);
     cudaFreeHost(conv_y_kernel);
     cudaFree(dev_gray_img);
-    cudaFree(dev_grad_x_img);
-    cudaFree(dev_grad_y_img);
     cudaFree(dev_grad_xy);
     cudaFreeHost(host_grad_xy);
     return 0;
